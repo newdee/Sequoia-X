@@ -1,14 +1,20 @@
 """数据引擎模块：负责 SQLite 行情数据存储与 akshare 增量同步。"""
 
+import random
 import sqlite3
+import time
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Literal
 
+import akshare as ak
 import pandas as pd
 
 from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
+from sequoia_x.data.adata_source import ADataSource
+from sequoia_x.data.infoway_source import Infoway
 
 logger = get_logger(__name__)
 
@@ -63,6 +69,9 @@ class DataEngine:
         """
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
+        self.range: int = settings.range
+        self.source: str = settings.source
+        self.infoway = Infoway(token=settings.infoway_token)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -112,12 +121,7 @@ class DataEngine:
             )
         return df
 
-    def sync_symbol(self, symbol: str) -> SyncResult:
-        import akshare as ak
-        import time
-        import random
-        from datetime import date, timedelta
-
+    def sync_symbol_ak(self, symbol: str) -> SyncResult:
         last_date = self._get_last_date(symbol)
         today_date = date.today()
         today_str = today_date.strftime("%Y%m%d")
@@ -140,7 +144,8 @@ class DataEngine:
         for attempt in range(max_retries):
             try:
                 # 伪装人类：每次请求前随机休眠 0.1 到 0.4 秒，打乱机械节奏
-                time.sleep(random.uniform(0.1, 0.4))
+                # time.sleep(random.uniform(0.1, 0.4))
+                time.sleep(random.uniform(0.8, 2.0))
 
                 df = ak.stock_zh_a_hist(
                     symbol=symbol,
@@ -149,15 +154,22 @@ class DataEngine:
                     end_date=today_str,
                     adjust="qfq",
                 )
+                logger.info(f"拉取{symbol}成功")
                 break  # 只要成功拉取，立刻跳出重试循环
 
             except Exception as exc:
                 error_str = str(exc)
                 # 识别被拔网线的特征
-                if "RemoteDisconnected" in error_str or "Connection aborted" in error_str:
+                if (
+                    "RemoteDisconnected" in error_str
+                    or "Connection aborted" in error_str
+                ):
                     if attempt < max_retries - 1:
-                        sleep_time = (attempt + 1) * 3  # 第一次被封睡3秒，第二次睡6秒
-                        logger.warning(f"[{symbol}] 触发反爬，蛰伏 {sleep_time} 秒后第 {attempt + 2} 次重试...")
+                        # sleep_time = (attempt + 1) * 3  # 第一次被封睡3秒，第二次睡6秒
+                        sleep_time = (2**attempt) + random.uniform(0, 1)
+                        logger.warning(
+                            f"[{symbol}] 触发反爬，蛰伏 {sleep_time} 秒后第 {attempt + 2} 次重试..."
+                        )
                         time.sleep(sleep_time)
                         continue
 
@@ -183,7 +195,16 @@ class DataEngine:
         df["symbol"] = symbol
 
         # 只保留需要的列，向量化操作，严禁 iterrows()
-        keep_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "turnover"]
+        keep_cols = [
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "turnover",
+        ]
         df = df[[c for c in keep_cols if c in df.columns]]
         df["date"] = df["date"].astype(str)
 
@@ -202,7 +223,80 @@ class DataEngine:
 
         return SyncResult(symbol=symbol, status="success", rows_added=rows)
 
-    def get_all_symbols(self) -> list[str]:
+    def sync_symbol_iw(self, symbol: str) -> SyncResult:
+        last_date = self._get_last_date(symbol.split(".")[0])
+        # logger.info(f"{symbol} updated at: {last_date} ")
+        today_date = date.today()
+        count = self.range
+
+        if last_date is None:
+            count = self.range
+        else:
+            if date.fromisoformat(last_date) >= today_date:
+                # logger.info(f"{symbol} 已是最新，跳过")
+                return SyncResult(symbol=symbol, status="skip")
+            last_date_obj = date.fromisoformat(last_date)
+            diff_days = (today_date - last_date_obj).days
+            count = max(diff_days + 5, 10)
+
+        time.sleep(1)
+        df = self.infoway.get_olhcv(symbol, count)
+
+        if df is None or df.empty:
+            return SyncResult(symbol=symbol, status="skip")
+
+        rows = len(df)
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                df.to_sql(
+                    "stock_daily",
+                    conn,
+                    if_exists="append",
+                    index=False,
+                    method="multi",
+                )
+        except sqlite3.IntegrityError as exc:
+            logger.warning(f"[{symbol}] 写入时遇到重复数据，已跳过：{exc}")
+
+        return SyncResult(symbol=symbol, status="success", rows_added=rows)
+
+    def sync_symbol_adata(self, symbol: str):
+        last_date = self._get_last_date(symbol)
+        today_date = date.today()
+
+        if last_date is not None and date.fromisoformat(last_date) >= today_date:
+            return SyncResult(symbol=symbol, status="skip")
+
+        df = ADataSource.get_ohlcv(symbol, start_date=self.start_date)
+
+        if df.empty:
+            return SyncResult(symbol=symbol, status="skip")
+
+        rows = len(df)
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                df.to_sql(
+                    "stock_daily",
+                    conn,
+                    if_exists="append",
+                    index=False,
+                    method="multi",
+                )
+        except sqlite3.IntegrityError as exc:
+            logger.warning(f"[{symbol}] 写入时遇到重复数据，已跳过：{exc}")
+
+        return SyncResult(symbol=symbol, status="success", rows_added=rows)
+
+    def sync_symbol(self, symbol: str) -> SyncResult:
+        match self.source:
+            case "adata":
+                return self.sync_symbol_adata(symbol)
+            case "infoway":
+                return self.sync_symbol_iw(symbol)
+            case _:
+                return self.sync_symbol_ak(symbol)
+
+    def get_all_symbols_ak(self) -> list[str]:
         """
         从 akshare 获取全市场 A 股 symbol 列表（轻量接口）。
         包含网络重试机制，防止服务器掐断连接。
@@ -210,13 +304,12 @@ class DataEngine:
         Returns:
             股票代码字符串列表，如 ['000001', '000002', ...]。
         """
-        import akshare as ak
-        import time
-
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                logger.info(f"正在获取全市场股票列表 (第 {attempt + 1}/{max_retries} 次尝试)...")
+                logger.info(
+                    f"正在获取全市场股票列表 (第 {attempt + 1}/{max_retries} 次尝试)..."
+                )
                 df = ak.stock_info_a_code_name()
                 logger.info(f"成功获取股票列表，共 {len(df)} 只股票。")
                 return df["code"].astype(str).tolist()
@@ -227,6 +320,21 @@ class DataEngine:
         logger.error("获取全市场列表最终失败！请检查网络连接。")
         return []
 
+    def get_all_symbols_iw(self) -> list[str]:
+        return Infoway.load_stock_codes_cn()
+
+    def get_all_symbols_adata(self) -> list[str]:
+        return ADataSource.load_stock_codes_cn()
+
+    def get_all_symbols(self) -> list[str]:
+        match self.source:
+            case "adata":
+                return self.get_all_symbols_adata()
+            case "infoway":
+                return self.get_all_symbols_iw()
+            case _:
+                return self.get_all_symbols_ak()
+
     def get_local_symbols(self) -> list[str]:
         """
         从本地 SQLite 数据库获取已有数据的股票代码列表，无需网络请求。
@@ -235,9 +343,7 @@ class DataEngine:
             本地已存在数据的股票代码列表。
         """
         with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT symbol FROM stock_daily"
-            ).fetchall()
+            rows = conn.execute("SELECT DISTINCT symbol FROM stock_daily").fetchall()
         return [row[0] for row in rows]
 
     def sync_all(self, symbols: list[str]) -> SyncSummary:
