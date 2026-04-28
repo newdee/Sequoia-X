@@ -209,23 +209,36 @@ class DataEngine:
         df["date"] = df["date"].astype(str)
 
         rows = len(df)
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                df.to_sql(
-                    "stock_daily",
-                    conn,
-                    if_exists="append",
-                    index=False,
-                    method="multi",
-                )
-        except sqlite3.IntegrityError as exc:
-            logger.warning(f"[{symbol}] 写入时遇到重复数据，已跳过：{exc}")
+        sql = """
+        INSERT INTO stock_daily (
+            symbol,
+            date,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            turnover
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(symbol, date) DO NOTHING
+        """
+        values = list(df.itertuples(index=False, name=None))
 
-        return SyncResult(symbol=symbol, status="success", rows_added=rows)
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.executemany(sql, values)
+            conn.commit()
+            inserted = cur.rowcount if cur.rowcount != -1 else rows
+
+        return SyncResult(
+            symbol=symbol,
+            status="success",
+            rows_added=inserted,
+        )
 
     def sync_symbol_iw(self, symbol: str) -> SyncResult:
         last_date = self._get_last_date(symbol.split(".")[0])
-        # logger.info(f"{symbol} updated at: {last_date} ")
+        logger.info(f"{symbol} updated at: {last_date} ")
         today_date = date.today()
         count = self.range
 
@@ -246,19 +259,33 @@ class DataEngine:
             return SyncResult(symbol=symbol, status="skip")
 
         rows = len(df)
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                df.to_sql(
-                    "stock_daily",
-                    conn,
-                    if_exists="append",
-                    index=False,
-                    method="multi",
-                )
-        except sqlite3.IntegrityError as exc:
-            logger.warning(f"[{symbol}] 写入时遇到重复数据，已跳过：{exc}")
+        sql = """
+        INSERT INTO stock_daily (
+            symbol,
+            date,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            turnover
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(symbol, date) DO NOTHING
+        """
 
-        return SyncResult(symbol=symbol, status="success", rows_added=rows)
+        values = list(df.itertuples(index=False, name=None))
+
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.executemany(sql, values)
+            conn.commit()
+            inserted = cur.rowcount if cur.rowcount != -1 else rows
+
+        return SyncResult(
+            symbol=symbol,
+            status="success",
+            rows_added=inserted,
+        )
 
     def sync_symbol_adata(self, symbol: str):
         last_date = self._get_last_date(symbol)
@@ -273,19 +300,33 @@ class DataEngine:
             return SyncResult(symbol=symbol, status="skip")
 
         rows = len(df)
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                df.to_sql(
-                    "stock_daily",
-                    conn,
-                    if_exists="append",
-                    index=False,
-                    method="multi",
-                )
-        except sqlite3.IntegrityError as exc:
-            logger.warning(f"[{symbol}] 写入时遇到重复数据，已跳过：{exc}")
+        sql = """
+        INSERT INTO stock_daily (
+            symbol,
+            date,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            turnover
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(symbol, date) DO NOTHING
+        """
 
-        return SyncResult(symbol=symbol, status="success", rows_added=rows)
+        values = list(df.itertuples(index=False, name=None))
+
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.executemany(sql, values)
+            conn.commit()
+            inserted = cur.rowcount if cur.rowcount != -1 else rows
+
+        return SyncResult(
+            symbol=symbol,
+            status="success",
+            rows_added=inserted,
+        )
 
     def sync_symbol(self, symbol: str) -> SyncResult:
         match self.source:
