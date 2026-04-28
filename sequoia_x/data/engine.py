@@ -250,9 +250,10 @@ class DataEngine:
                 return SyncResult(symbol=symbol, status="skip")
             last_date_obj = date.fromisoformat(last_date)
             diff_days = (today_date - last_date_obj).days
-            count = max(diff_days + 5, 10)
+            # count = max(diff_days + 5, 10)
+            count = diff_days
 
-        time.sleep(1)
+        time.sleep(0.7)
         df = self.infoway.get_olhcv(symbol, count)
 
         if df is None or df.empty:
